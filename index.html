@@ -127,8 +127,8 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
 <script>
 (function () {
   /* Supabase project settings (the anon key is meant to be public). */
-  var SB_URL = '';
-  var SB_KEY = '';
+  var SB_URL = 'https://qmkcjerizgizpulljdmj.supabase.co';
+  var SB_KEY = 'sb_publishable_XhiSVNvZh5u6OoTh--uvzg_ShSCbkrh';
 
   var KEY = 'wizard-sheets-v1', CODE_KEY = 'wizard-sync-code';
   var games = [];
@@ -149,7 +149,7 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
   function rpc(name, body) {
     return fetch(SB_URL + '/rest/v1/rpc/' + name, {
       method: 'POST',
-      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      headers: { apikey: SB_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
