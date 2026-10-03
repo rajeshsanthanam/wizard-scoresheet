@@ -126,18 +126,68 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
 
 <script>
 (function () {
-  var KEY = 'wizard-sheets-v1';
+  /* Supabase project settings (the anon key is meant to be public). */
+  var SB_URL = '';
+  var SB_KEY = '';
+
+  var KEY = 'wizard-sheets-v1', CODE_KEY = 'wizard-sync-code';
   var games = [];
   var memOnly = false;
   try { games = JSON.parse(localStorage.getItem(KEY) || '[]') || []; } catch (e) { games = []; memOnly = true; }
+  games.forEach(function (g) { if (!g.updated) g.updated = g.created; });
+  var code = '';
+  try { code = localStorage.getItem(CODE_KEY) || ''; } catch (e) {}
   function save() { try { localStorage.setItem(KEY, JSON.stringify(games)); } catch (e) { memOnly = true; } }
+  function touch(g) { g.updated = Date.now(); save(); scheduleSync(); }
+  function visible() { return games.filter(function (g) { return !g.deleted; }); }
 
-  var ui = { view: 'home', id: null, round: 0, tab: 'round', count: 4, names: ['', '', '', ''], confirmDel: false };
+  var ui = { view: 'home', id: null, round: 0, tab: 'round', count: 4, names: ['', '', '', ''], confirmDel: false, sync: code ? 'idle' : 'off', msg: '' };
   var app = document.getElementById('app');
+
+  /* Sync: each game is one row under the shared code. Newest edit of a game wins. */
+  var configured = !!(SB_URL && SB_KEY), busy = false, again = false, timer = null;
+  function rpc(name, body) {
+    return fetch(SB_URL + '/rest/v1/rpc/' + name, {
+      method: 'POST',
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text().then(function (t) { return t ? JSON.parse(t) : null; });
+    });
+  }
+  function scheduleSync() { if (!code || !configured) return; clearTimeout(timer); timer = setTimeout(sync, 700); }
+  function sync() {
+    if (!code || !configured) return;
+    if (busy) { again = true; return; }
+    busy = true; ui.sync = 'syncing';
+    if (ui.view === 'home') render();
+    rpc('get_sheets', { p_code: code }).then(function (rows) {
+      var remote = {}, changed = false;
+      (rows || []).forEach(function (row) {
+        remote[row.id] = row;
+        var i = -1;
+        games.forEach(function (g, k) { if (g.id === row.id) i = k; });
+        if (i < 0) { games.push(row.data); changed = true; }
+        else if (row.data.updated > games[i].updated) { games[i] = row.data; changed = true; }
+      });
+      var pushes = games.filter(function (g) { return !remote[g.id] || remote[g.id].updated_at < g.updated; })
+        .map(function (g) { return rpc('put_sheet', { p_code: code, p_id: g.id, p_data: g, p_updated: g.updated, p_deleted: !!g.deleted }); });
+      return Promise.all(pushes).then(function () { return changed; });
+    }).then(function (changed) {
+      save(); ui.sync = 'ok'; ui.msg = '';
+      if (changed && (ui.view === 'home' || ui.view === 'game')) render(); else if (ui.view === 'home' || ui.view === 'sync') render();
+    }).catch(function () {
+      ui.sync = 'error';
+      if (ui.view === 'home' || ui.view === 'sync') render();
+    }).then(function () { busy = false; if (again) { again = false; scheduleSync(); } });
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) sync(); });
+  setInterval(function () { if (!document.hidden && ui.view !== 'setup') sync(); }, 20000);
 
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-  function cur() { return games.filter(function (g) { return g.id === ui.id; })[0]; }
+  function cur() { return visible().filter(function (g) { return g.id === ui.id; })[0]; }
   function fmtDate(t) { return new Date(t).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }); }
 
   /* Rules: 60-card deck, rounds = 60 / players; round n deals n cards.
@@ -175,12 +225,14 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
   function render() {
     if (ui.view === 'home') app.innerHTML = homeView();
     else if (ui.view === 'setup') app.innerHTML = setupView();
+    else if (ui.view === 'sync') app.innerHTML = syncView();
     else app.innerHTML = gameView();
   }
 
   function homeView() {
-    var list = games.slice().sort(function (a, b) { return b.created - a.created; });
-    var h = '<div class="top"><h1>Wizard Scoresheet</h1></div><div class="stack">';
+    var list = visible().sort(function (a, b) { return b.created - a.created; });
+    var label = ui.sync === 'syncing' ? 'Syncing…' : ui.sync === 'ok' ? 'Synced' : ui.sync === 'error' ? 'Sync failed, tap to retry' : code ? 'Sync on' : 'Sync across devices';
+    var h = '<div class="top"><h1>Wizard Scoresheet</h1><button class="pill ' + (ui.sync === 'ok' ? 'done' : ui.sync === 'error' ? '' : 'live') + '" style="background:transparent;min-height:36px" data-act="sync-open">' + label + '</button></div><div class="stack">';
     h += '<button class="btn block" data-act="new">New sheet</button>';
     if (!list.length) {
       h += '<div class="empty panel">No games yet. Start a new sheet and it will be saved here for you to review any time.</div>';
@@ -202,6 +254,25 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
       '<li>Highest total after the last round wins.</li></ul></details>';
     if (memOnly) h += '<p class="muted small">Saving is blocked in this browser, so sheets will be lost when you close the page.</p>';
     return h + '</div>';
+  }
+
+  function syncView() {
+    var h = '<div class="top"><button class="back" data-act="home" aria-label="Back">‹</button><h1>Sync</h1></div><div class="stack panel">';
+    if (!configured) {
+      h += '<p style="margin:0">Cloud sync is not set up in this copy of the app yet.</p>';
+    } else {
+      h += '<p class="muted small" style="margin:0">Enter the same sync code on every phone and laptop. Anyone with the code can see and edit these games, so keep it private.</p>' +
+        '<div class="field"><label for="code">Sync code</label><input type="text" id="code" value="' + esc(code) + '" placeholder="At least 8 characters" autocomplete="off" autocapitalize="off" spellcheck="false"></div>' +
+        '<div class="seg" style="grid-template-columns:1fr 1fr"><button data-act="gen">Make a code</button><button data-act="code-save" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Save and sync</button></div>';
+      if (ui.msg) h += '<p class="small" style="margin:0;color:var(--bad)">' + esc(ui.msg) + '</p>';
+      else if (ui.sync === 'ok') h += '<p class="small" style="margin:0;color:var(--good)">Synced. Games on this device match the cloud.</p>';
+      else if (ui.sync === 'error') h += '<p class="small" style="margin:0;color:var(--bad)">Could not reach the cloud. Check your connection and try again.</p>';
+      if (code) h += '<button class="btn ghost" data-act="code-off">Stop syncing on this device</button>';
+    }
+    h += '<hr style="border:0;border-top:1px solid var(--line);width:100%;margin:4px 0"><div class="field"><label>Backup file</label></div>' +
+      '<div class="seg" style="grid-template-columns:1fr 1fr"><button data-act="export">Export</button><button data-act="import">Import</button></div>' +
+      '<input type="file" id="imp" accept="application/json,.json" hidden></div>';
+    return h;
   }
 
   function setupView() {
@@ -316,7 +387,7 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
       var rounds = [];
       for (var r = 0; r < 60 / ui.count; r++) rounds.push({ bids: players.map(function () { return null; }), tricks: players.map(function () { return null; }) });
       var ng = { id: uid(), created: Date.now(), players: players, rounds: rounds };
-      games.push(ng); save();
+      ng.updated = ng.created; games.push(ng); touch(ng);
       ui.view = 'game'; ui.id = ng.id; ui.round = 0; ui.tab = 'round'; ui.confirmDel = false;
     }
     else if (act === 'open') {
@@ -331,7 +402,32 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
     else if (act === 'goto') { ui.round = +el.getAttribute('data-r'); ui.tab = 'round'; window.scrollTo(0, 0); }
     else if (act === 'del') { ui.confirmDel = true; }
     else if (act === 'del-no') { ui.confirmDel = false; }
-    else if (act === 'del-yes') { games = games.filter(function (x) { return x.id !== g.id; }); save(); ui.view = 'home'; ui.confirmDel = false; }
+    else if (act === 'del-yes') { g.deleted = true; touch(g); ui.view = 'home'; ui.confirmDel = false; }
+    else if (act === 'sync-open') { ui.view = 'sync'; ui.msg = ''; if (code) sync(); }
+    else if (act === 'gen') {
+      var abc = 'abcdefghjkmnpqrstuvwxyz23456789', s = '', rnd = new Uint8Array(12);
+      (window.crypto || window.msCrypto).getRandomValues(rnd);
+      for (var k = 0; k < 12; k++) s += abc[rnd[k] % abc.length];
+      code = s; ui.msg = '';
+    }
+    else if (act === 'code-save') {
+      var v = (document.getElementById('code').value || '').trim().toLowerCase();
+      if (v.length < 8) { ui.msg = 'Use at least 8 characters.'; }
+      else {
+        code = v; ui.msg = ''; ui.sync = 'idle';
+        try { localStorage.setItem(CODE_KEY, code); } catch (e) {}
+        sync();
+      }
+    }
+    else if (act === 'code-off') { code = ''; ui.sync = 'off'; try { localStorage.removeItem(CODE_KEY); } catch (e) {} }
+    else if (act === 'export') {
+      var blob = new Blob([JSON.stringify(visible(), null, 1)], { type: 'application/json' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'wizard-sheets.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      return;
+    }
+    else if (act === 'import') { document.getElementById('imp').click(); return; }
     else {
       var m = act.match(/^(bid|won)([+-])$/);
       if (m && g) {
@@ -339,12 +435,30 @@ td .sub.good { color: var(--good); } td .sub.bad { color: var(--bad); }
         var i2 = +el.getAttribute('data-i'), max = ui.round + 1, v = arr[i2];
         if (m[2] === '+') arr[i2] = v == null ? 0 : Math.min(max, v + 1);
         else arr[i2] = v == null ? 0 : Math.max(0, v - 1);
-        save();
+        touch(g);
       }
     }
     render();
   });
+  app.addEventListener('change', function (e) {
+    if (e.target.id !== 'imp' || !e.target.files[0]) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      try {
+        var arr = JSON.parse(rd.result), n = 0;
+        arr.forEach(function (g) {
+          if (!g || !g.id || !g.players || !g.rounds) return;
+          var have = games.filter(function (x) { return x.id === g.id; })[0];
+          if (!have) { g.updated = g.updated || Date.now(); g.deleted = false; games.push(g); n++; }
+        });
+        save(); scheduleSync();
+        ui.view = 'home'; render();
+      } catch (err) { ui.msg = 'That file is not a Wizard backup.'; render(); }
+    };
+    rd.readAsText(e.target.files[0]);
+  });
 
   render();
+  sync();
 })();
 </script>
